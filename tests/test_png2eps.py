@@ -237,6 +237,52 @@ class TestPng2Eps(unittest.TestCase):
         # Default 16x16 sprite auto-scales to 4000x4000 (16 MP, 15-25 MP sweet spot)
         self.assertIn("%%BoundingBox: 0 0 4000 4000", content)
 
+    def test_svg_to_eps_and_preview_via_png2eps(self):
+        # Generate SVG first
+        svg_path = os.path.join(self.temp_dir.name, "source.svg")
+        convert_png_to_svg(self.png_path, svg_path, mode="pixel")
+
+        script_path = os.path.join(os.path.dirname(__file__), "..", "png2eps.py")
+        res = subprocess.run(
+            ["python3", script_path, svg_path, "--preview"],
+            capture_output=True, text=True, cwd=self.temp_dir.name
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        eps_path = os.path.join(self.temp_dir.name, "source.eps")
+        jpg_path = os.path.join(self.temp_dir.name, "source.jpg")
+        self.assertTrue(os.path.exists(eps_path))
+        self.assertTrue(os.path.exists(jpg_path))
+
+        with open(eps_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("%%BoundingBox: 0 0 4000 4000", content)
+
+        with Image.open(jpg_path) as im:
+            self.assertEqual(im.size, (6000, 6000))
+
+    def test_svg2eps_cli(self):
+        # Generate SVG first
+        svg_path = os.path.join(self.temp_dir.name, "heart.svg")
+        convert_png_to_svg(self.png_path, svg_path, mode="pixel")
+
+        script_path = os.path.join(os.path.dirname(__file__), "..", "svg2eps.py")
+        res = subprocess.run(
+            ["python3", script_path, svg_path, "--preview", "--canvas-min-side", "4800"],
+            capture_output=True, text=True, cwd=self.temp_dir.name
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        eps_path = os.path.join(self.temp_dir.name, "heart.eps")
+        jpg_path = os.path.join(self.temp_dir.name, "heart.jpg")
+        self.assertTrue(os.path.exists(eps_path))
+        self.assertTrue(os.path.exists(jpg_path))
+
+        with open(eps_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("%%BoundingBox: 0 0 4800 4800", content)
+
+        with Image.open(jpg_path) as im:
+            self.assertEqual(im.size, (6000, 6000))
+
 
 if __name__ == "__main__":
     unittest.main()

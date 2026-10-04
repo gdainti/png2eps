@@ -125,6 +125,27 @@ By default, `png2eps` automatically calculates the optimal canvas dimensions for
 ./png2eps.py input.png output.eps --rle
 ```
 
+### 5. SVG to EPS Conversion (`svg2eps`)
+
+You can also convert existing SVG pixel art files to Illustrator-compatible EPS files and companion preview JPEGs using either `svg2eps.py` or `png2eps.py`:
+
+```bash
+# Convert SVG to stock-ready EPS (auto-scaled to 15-25 MP sweet spot):
+./svg2eps.py icon.svg
+
+# Convert SVG to EPS and generate high-res preview JPEG (default: 6000px):
+./svg2eps.py icon.svg --preview
+
+# Keep original 1:1 SVG artboard dimensions:
+./svg2eps.py icon.svg --original-size
+
+# Specify custom artboard dimensions and preview JPEG size:
+./svg2eps.py icon.svg --canvas-min-side 4000 --preview --preview-min-side 6000
+
+# You can also pass SVG directly to png2eps:
+./png2eps.py icon.svg --preview
+```
+
 ## Running Tests
 
 ```bash

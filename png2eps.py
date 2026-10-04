@@ -12,7 +12,7 @@ import re
 import sys
 from typing import List, Tuple, Dict, Optional
 import xml.etree.ElementTree as ET
-from PIL import Image, ImageColor
+from PIL import Image, ImageColor, ImageDraw
 
 
 def detect_solid_background(
@@ -451,7 +451,14 @@ def parse_svg_to_rects(svg_path: str):
 
     def walk(elem, parent_color):
         nonlocal bg_color
-        color_attr = elem.attrib.get("fill", parent_color)
+        color_attr = elem.attrib.get("fill")
+        if not color_attr and "style" in elem.attrib:
+            style_m = re.search(r"fill\s*:\s*([^;]+)", elem.attrib["style"])
+            if style_m:
+                color_attr = style_m.group(1).strip()
+        if not color_attr:
+            color_attr = parent_color
+
         tag = elem.tag.split("}")[-1]
 
         if tag == "rect":
@@ -461,8 +468,10 @@ def parse_svg_to_rects(svg_path: str):
             h = float(elem.attrib.get("height", 0))
             color = parse_color_string(color_attr) if color_attr and color_attr != "none" else None
 
-            # Detect canvas background rectangle
-            if x == 0 and y == 0 and w == orig_w and h == orig_h:
+            # Detect canvas background rectangle (covers entire artboard at origin)
+            is_full_w = (w == orig_w or w == out_w or elem.attrib.get("width") == "100%")
+            is_full_h = (h == orig_h or h == out_h or elem.attrib.get("height") == "100%")
+            if x == 0 and y == 0 and is_full_w and is_full_h:
                 bg_color = color
             else:
                 if color:
@@ -472,7 +481,7 @@ def parse_svg_to_rects(svg_path: str):
             d = elem.attrib.get("d", "")
             color = parse_color_string(color_attr) if color_attr and color_attr != "none" else None
             if color:
-                for m in re.finditer(r"M\s*([\d\.-]+)\s+([\d\.-]+)h([\d\.-]+)v([\d\.-]+)h(?:-?[\d\.-]+)z", d, re.I):
+                for m in re.finditer(r"M\s*([\d\.-]+)[\s,]+([\d\.-]+)\s*h\s*([\d\.-]+)\s*v\s*([\d\.-]+)\s*[hH](?:-?[\d\.-]+)?\s*z", d, re.I):
                     px, py, pw, ph = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
                     rects.append((px, py, pw, ph, color))
 
@@ -588,6 +597,31 @@ def calculate_output_dimensions(
     return orig_w, orig_h
 
 
+def rasterize_svg_rects_to_image(
+    orig_w: float,
+    orig_h: float,
+    rects: List[Tuple[float, float, float, float, Tuple[int, int, int, int]]],
+    bg_color: Optional[Tuple[int, int, int, int]] = None,
+    transparent_bg: bool = False
+) -> Image.Image:
+    """
+    Render parsed pixel art SVG rects into an exact 1:1 RGBA PIL Image.
+    """
+    w = max(1, int(round(orig_w)))
+    h = max(1, int(round(orig_h)))
+    base_col = bg_color if bg_color and not transparent_bg else (0, 0, 0, 0)
+    img = Image.new("RGBA", (w, h), base_col)
+    draw = ImageDraw.Draw(img)
+    for rx, ry, rw, rh, color in rects:
+        x0 = int(round(rx))
+        y0 = int(round(ry))
+        x1 = int(round(rx + rw)) - 1
+        y1 = int(round(ry + rh)) - 1
+        if x1 >= x0 and y1 >= y0:
+            draw.rectangle([x0, y0, x1, y1], fill=color)
+    return img
+
+
 def generate_preview_jpg(
     input_path: str,
     output_path: str,
@@ -596,39 +630,55 @@ def generate_preview_jpg(
     scale: Optional[float] = None,
     bg_color: Optional[Tuple[int, int, int, int]] = None,
     transparent_bg: bool = False,
-    quality: int = 95
+    quality: int = 95,
+    rects: Optional[List[Tuple[float, float, float, float, Tuple[int, int, int, int]]]] = None,
+    orig_size: Optional[Tuple[float, float]] = None
 ) -> dict:
     """
     Generate high-resolution preview JPEG using nearest-neighbor scaling
     to preserve razor-sharp pixel art edges without anti-aliasing artifacts.
+    Supports both PNG and SVG inputs.
     """
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
-    with Image.open(input_path) as img:
-        img = img.convert("RGBA")
-        width, height = img.size
+    is_svg = input_path.lower().endswith(".svg")
 
-        out_w, out_h = calculate_output_dimensions(
-            width, height, scale=scale, min_side=min_side, max_side=max_side
-        )
-
-        # Nearest-neighbor resize for razor-sharp pixel edges
-        resized = img.resize((out_w, out_h), resample=Image.Resampling.NEAREST)
-
-        # JPEG requires RGB. Determine canvas background color.
-        if bg_color is not None and not transparent_bg:
-            bg_rgb = bg_color[:3]
+    if is_svg:
+        if rects is None or orig_size is None:
+            orig_w, orig_h, _, _, rects, parsed_bg = parse_svg_to_rects(input_path)
+            if bg_color is None:
+                bg_color = parsed_bg
         else:
-            bg_rgb = (255, 255, 255)  # Clean white background for transparent vectors
+            orig_w, orig_h = orig_size
 
-        canvas = Image.new("RGB", (out_w, out_h), bg_rgb)
-        alpha = resized.split()[3]
-        canvas.paste(resized, (0, 0), mask=alpha)
+        img = rasterize_svg_rects_to_image(orig_w, orig_h, rects, bg_color, transparent_bg)
+    else:
+        with Image.open(input_path) as orig_img:
+            img = orig_img.convert("RGBA")
 
-        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        # subsampling=0 (4:4:4) disables chroma subsampling so pixel boundaries don't bleed color
-        canvas.save(output_path, "JPEG", quality=quality, subsampling=0)
+    width, height = img.size
+
+    out_w, out_h = calculate_output_dimensions(
+        width, height, scale=scale, min_side=min_side, max_side=max_side
+    )
+
+    # Nearest-neighbor resize for razor-sharp pixel edges
+    resized = img.resize((out_w, out_h), resample=Image.Resampling.NEAREST)
+
+    # JPEG requires RGB. Determine canvas background color.
+    if bg_color is not None and not transparent_bg:
+        bg_rgb = bg_color[:3]
+    else:
+        bg_rgb = (255, 255, 255)  # Clean white background for transparent vectors
+
+    canvas = Image.new("RGB", (out_w, out_h), bg_rgb)
+    alpha = resized.split()[3]
+    canvas.paste(resized, (0, 0), mask=alpha)
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    # subsampling=0 (4:4:4) disables chroma subsampling so pixel boundaries don't bleed color
+    canvas.save(output_path, "JPEG", quality=quality, subsampling=0)
 
     file_size = os.path.getsize(output_path)
     return {
@@ -777,11 +827,17 @@ def convert_png_or_svg_to_eps(
 
     # If input is already an SVG
     if input_path.lower().endswith(".svg"):
-        orig_w, orig_h, cur_out_w, cur_out_h, rects, bg_color = parse_svg_to_rects(input_path)
+        orig_w, orig_h, cur_out_w, cur_out_h, rects, parsed_bg = parse_svg_to_rects(input_path)
+        bg_color = parsed_bg
+        if bg and bg.lower() not in ("none", "false", "auto"):
+            bg_color = parse_color_string(bg)
+        elif bg and bg.lower() == "auto":
+            bg_color = parsed_bg
+
         # Apply scaling if requested, else use SVG's out dimensions
         if scale or target_w or target_h or size_str or min_side or max_side or stock:
             out_w, out_h = calculate_output_dimensions(
-                orig_w, orig_h, scale=scale, target_w=target_w, target_h=target_h, size_str=size_str,
+                int(round(orig_w)), int(round(orig_h)), scale=scale, target_w=target_w, target_h=target_h, size_str=size_str,
                 min_side=min_side, max_side=max_side, stock=stock
             )
         else:
@@ -804,13 +860,18 @@ def convert_png_or_svg_to_eps(
             f.write(eps_content)
 
         return {
-            "input_size": (orig_w, orig_h),
+            "input_size": (int(round(orig_w)), int(round(orig_h))),
             "output_size": (out_w, out_h),
             "rects_count": len(rects) + (1 if bg_color and not transparent_bg else 0),
             "bg_color": bg_color,
+            "bg_detected": bg_color is not None,
+            "bg_pixels_removed": 1 if bg_color else 0,
+            "transparent_bg": transparent_bg,
             "color_mode": color_mode,
             "eps_style": eps_style,
             "eps_file_size": len(eps_content.encode("utf-8")),
+            "rects": rects,
+            "orig_size": (orig_w, orig_h),
         }
 
     # Input is PNG
@@ -1250,13 +1311,17 @@ def main():
             print(f"  Vector paths: {stats_eps['rects_count']} objects ({stats_eps['eps_file_size'] / 1024:.2f} KB)")
 
         # Generate companion preview JPEG if requested
-        if args.preview and in_ext == ".png":
+        if args.preview:
             preview_file = f"{base}.jpg"
             bg_col = None
             trans_bg = args.transparent_bg
+            rects = None
+            orig_size = None
             if stats_eps:
                 bg_col = stats_eps.get("bg_color")
                 trans_bg = stats_eps.get("transparent_bg", False)
+                rects = stats_eps.get("rects")
+                orig_size = stats_eps.get("orig_size")
             elif stats_svg:
                 bg_col = stats_svg.get("bg_color")
                 trans_bg = stats_svg.get("transparent_bg", False)
@@ -1271,7 +1336,9 @@ def main():
                 scale=args.preview_scale,
                 bg_color=bg_col,
                 transparent_bg=trans_bg,
-                quality=args.preview_quality
+                quality=args.preview_quality,
+                rects=rects,
+                orig_size=orig_size
             )
             p_w, p_h = stats_preview["output_size"]
             print(f"Successfully generated Preview JPEG: {preview_file}")
